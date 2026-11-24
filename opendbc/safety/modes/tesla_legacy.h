@@ -1072,12 +1072,28 @@ static bool tesla_legacy_hybrid_steering_overlay_violation(const CANPacket_t *ms
 static const int TESLA_LEGACY_V229_ACCEL_RAW_MIN = 288;       // -3.48 m/s^2 (existing envelope)
 static const int TESLA_LEGACY_V229_ACCEL_RAW_MAX = 425;       // +2.00 m/s^2 (existing envelope)
 static const int TESLA_LEGACY_V229_ACCEL_RAW_ZERO = 375;      //  0.00 m/s^2
+static const int TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MIN = 340; // -1.40 m/s^2 (Unity priming)
+static const int TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MAX = 420; // +1.80 m/s^2 (Unity priming)
+static const int TESLA_LEGACY_V229_PRIME_JERK_MIN_RAW = 492;  // >= -0.46 m/s^3
+static const int TESLA_LEGACY_V229_PRIME_JERK_MAX_RAW = 9;    // <= +0.53 m/s^3
 static const uint8_t TESLA_LEGACY_V229_ACC_STATE_CANCEL_GENERIC = 0U;
 static const uint8_t TESLA_LEGACY_V229_ACC_STATE_ON = 4U;
 static const uint8_t TESLA_LEGACY_V229_ACC_STATE_CANCEL_SILENT = 13U;
 
+static int tesla_legacy_das_raw_set_speed(const uint8_t *data) {
+  return ((int)data[0]) | (((int)(data[1] & 0x0FU)) << 8);
+}
+
 static int tesla_legacy_das_acc_state(const uint8_t *data) {
   return (int)((data[1] >> 4) & 0x0FU);
+}
+
+static int tesla_legacy_das_raw_jerk_min(const uint8_t *data) {
+  return (((int)(data[3] & 0x07U)) << 6) | ((int)(data[2] >> 2));
+}
+
+static int tesla_legacy_das_raw_jerk_max(const uint8_t *data) {
+  return (((int)(data[4] & 0x07U)) << 5) | ((int)(data[3] >> 3));
 }
 
 static int tesla_legacy_das_raw_accel_min(const uint8_t *data) {
@@ -1151,19 +1167,20 @@ static void tesla_legacy_v229_capture_das_control(const CANPacket_t *msg) {
   const bool long_allowed = controls_allowed && get_longitudinal_allowed();
   const bool neutral = (raw_min == TESLA_LEGACY_V229_ACCEL_RAW_ZERO) &&
                        (raw_max == TESLA_LEGACY_V229_ACCEL_RAW_ZERO);
-  // XNOR 0.11.2 migration safety gate: the old V229 code accepted a
-  // non-neutral "priming" envelope without active longitudinal authority,
-  // then substituted it onto genuine AP CAN. No such exception is qualified.
-  // Without real pedal/brake/state checks and positive OP permission, reject
-  // the template entirely. A fresh 0x659 request alone grants no authority.
-  if (!long_allowed) {
-    tesla_legacy_v229_tmpl_valid = false;
-    tesla_legacy_v229_tmpl_needs_long = false;
-    return;
+  // Priming (Unity parity) is only ever a 0 kph target with a very low jerk envelope, so even
+  // an unexpectedly engaged DI can only ease gently until the 1.5 s cancel backstop.
+  const bool priming = (tesla_legacy_das_raw_set_speed(d) == 0) &&
+                       (raw_min >= TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MIN) &&
+                       (raw_max <= TESLA_LEGACY_V229_PRIME_ACCEL_RAW_MAX) &&
+                       (tesla_legacy_das_raw_jerk_min(d) >= TESLA_LEGACY_V229_PRIME_JERK_MIN_RAW) &&
+                       (tesla_legacy_das_raw_jerk_max(d) <= TESLA_LEGACY_V229_PRIME_JERK_MAX_RAW);
+  if (!long_allowed && !neutral && !priming) {
+    // Not authorised to accelerate/brake: keep OP as the single author, but only with a
+    // neutral 0/0 envelope (no handing the DI back to a native frame mid-stream).
+    tesla_legacy_das_set_neutral_accel(d);
   }
-  // Re-check the actual permission at substitution time as it can be revoked
-  // between capturing and receiving the next genuine AP frame.
-  tesla_legacy_v229_tmpl_needs_long = !neutral;
+  // Re-checked at substitution time: authority may be revoked after capture.
+  tesla_legacy_v229_tmpl_needs_long = long_allowed && !neutral && !priming;
 
   tesla_legacy_v229_tmpl_l = tesla_legacy_get_u32_le(&d[0]);
   tesla_legacy_v229_tmpl_h = tesla_legacy_get_u32_le(&d[4]);
@@ -1186,14 +1203,6 @@ static void tesla_legacy_v229_observe_di_state(int bus_num, const CANPacket_t *t
 // Returns true if the frame was modified (OP authored), false to forward the genuine frame.
 static bool tesla_legacy_v229_apply_das_control(CANPacket_t *to_fwd) {
   if (!tesla_legacy_v229_owner_active() || (GET_LEN(to_fwd) != 8)) {
-    tesla_legacy_v229_unowned_di = false;
-    return false;
-  }
-  // Fail open to a GENUINE native AP frame, not to an unqualified OP copy.
-  // Legacy inactive "priming" / unowned-DI cancel overlays require separate
-  // proof with physical CAN replay; neither can author a live 0x2B9/0x2BF
-  // while OP longitudinal authority has been revoked.
-  if (!controls_allowed || !get_longitudinal_allowed()) {
     tesla_legacy_v229_unowned_di = false;
     return false;
   }
