@@ -18,8 +18,7 @@ V229 (XNOR_V229_UNITY_STOPGO_OWNER): HW2 Hybrid longitudinal templates are accep
 only when openpilot is engaged, longitudinally active, CAN-valid, in Drive, with no pedal,
 stock AEB, ACC fault or native Autosteer owner. They are consumed by both Pandas and
 may be substituted onto genuine AP 0x2B9/0x2BF frames only after Panda safety checks.
-The old disconnected/standby 0 km/h priming exception is DISABLED: do not infer
-zero-speed auto-arm or lead/curve braking capability from this source port.
+Disengaged/standby 0 km/h priming is restored from the proven V229 path so DI can arm at standstill; active acceleration remains gated separately.
 Opt out: touch /data/xnor_disable_op_stopgo.
 """
 
@@ -111,8 +110,8 @@ _V229_STOPGO_CARS = (CAR.TESLA_MODEL_S_HW2, CAR.TESLA_MODEL_X_HW2)
 _V229_ACCEL_TO_SPEED_S = 3.0                # Unity ACCEL_TO_SPEED_MULTIPLIER: setSpeed = vEgo + 3 * accel
 _V229_SET_SPEED_MAX_KPH = 200.0             # Unity clip
 _V229_ACTIVE_JERK = (-8.0, 8.0)             # Unity JERK_LIMIT_MIN/MAX
-# V229 disengaged priming deliberately disabled in this native 0.11.2 port.
-# V229 disengaged priming deliberately disabled in this native 0.11.2 port.
+_V229_PRIME_ACCEL = (-1.4, 1.8)             # Unity: "send this values so we can enable at 0 km/h"
+_V229_PRIME_JERK = (-0.46, 0.476)
 _V229_ACC_STATE_CANCEL_GENERIC = 0
 _V229_ACC_STATE_ON = 4
 _V229_ACC_STATE_CANCEL_SILENT = 13
@@ -1315,15 +1314,8 @@ class CarController(CarControllerBase):
       self._automated_cruise_action_time_ms = int(self._now_ms())
 
   # --- V229: Unity-style stop-and-go owner -------------------------------------------------------
-  def _v229_compute_owner(self, CC, CS) -> bool:
-    """Request V229 longitudinal ownership only during genuine OP acceleration control.
-
-    A drive-latched Hybrid selection is NOT authorization. The original port
-    requested ownership during disengaged/priming states, potentially causing
-    a synthetic ACC_ON to replace native AP frames. Keep native authority
-    until engaged, CAN-valid, drive gear, and physically free of brake/gas.
-    Panda independently validates all critical sources and template content.
-    """
+  def _v229_compute_owner(self, CS) -> bool:
+    """True while OP should be the single DAS_control author (panda enforces the same rules)."""
     if not self._v229_stopgo_selected:
       return False
     autopilot_disabled = bool(self._cached_autopilot_disabled)
@@ -1333,31 +1325,20 @@ class CarController(CarControllerBase):
     if not (hybrid or ap_disabled_acc):
       return False
     cs_out = getattr(CS, "out", None)
-    cc_cruise = getattr(CC, "cruiseControl", None)
-    if cs_out is None or not bool(getattr(CC, "enabled", False)) or not bool(getattr(CC, "longActive", False)):
-      return False
-    if bool(getattr(cc_cruise, "cancel", True)):
-      return False
-    if not bool(getattr(cs_out, "canValid", False)) or bool(getattr(cs_out, "canTimeout", True)):
-      return False
-    if getattr(cs_out, "gearShifter", None) != structs.CarState.GearShifter.drive:
-      return False
-    if (bool(getattr(cs_out, "brakePressed", True)) or bool(getattr(cs_out, "gasPressed", True)) or
-        bool(getattr(cs_out, "stockAeb", True)) or bool(getattr(cs_out, "accFaulted", True))):
-      return False
-    # Genuine native Autosteer owns TACC. Do not author a competing frame.
-    if hybrid and bool(getattr(cs_out, "stockLkas", True)):
+    # Unity parity: genuine native Autosteer owns TACC. Hand DAS_control back to the AP.
+    if hybrid and bool(getattr(cs_out, "stockLkas", False)):
       return False
     return True
 
   def _v229_stopgo_long(self, CC, CS, can_sends) -> None:
     """Emit Unity-parity DAS_control TEMPLATES at 50 Hz for both pandas.
 
-    Modes: eligible longitudinal acceleration/braking only. Off-gear,
-    disengaged, and priming attempts produce no template, preserving native
-    AP traffic. Physical brake/regen, genuine AEB, disabled longitudinal
-    and CAN faults revoke the V229 owner in _v229_compute_owner().
-    No unqualified set-speed priming or synthetic ACC_ON is permitted here.
+    Modes (first match wins):
+      not_drive : ACC_CANCEL_GENERIC(0), 0 kph, priming envelope          (Unity parity)
+      cancel    : ACC_CANCEL_SILENT(13), neutral 0/0 -> DI cruise engaged but OP is not
+      active    : ACC_ON(4), setSpeed = vEgo + 3*a, split accel limits     (Unity parity)
+      neutral   : ACC_ON(4), setSpeed = vEgo, 0/0 (OP engaged, long overridden: gas/brake latch)
+      priming   : ACC_ON(4), 0 kph, accel -1.4..+1.8, jerk -0.46..+0.476   (Unity parity)
     """
     cs_out = CS.out
     stock_state = str(getattr(CS, "stock_cruise_state", "") or "").upper()
@@ -1388,9 +1369,11 @@ class CarController(CarControllerBase):
 
     accel = 0.0
     if not in_drive:
-      self._v229_mode = "native_not_drive"
-      return
-    if unowned_di:
+      mode = "not_drive"
+      acc_state, set_kph = _V229_ACC_STATE_CANCEL_GENERIC, 0.0
+      accel_min, accel_max = _V229_PRIME_ACCEL
+      jerk_min, jerk_max = _V229_PRIME_JERK
+    elif unowned_di:
       mode = "cancel"
       acc_state, set_kph = _V229_ACC_STATE_CANCEL_SILENT, v_ego_kph
       accel_min, accel_max = 0.0, 0.0
@@ -1408,8 +1391,10 @@ class CarController(CarControllerBase):
       accel_min, accel_max = 0.0, 0.0
       jerk_min, jerk_max = _V229_ACTIVE_JERK
     else:
-      self._v229_mode = "native_not_engaged"
-      return
+      mode = "priming"
+      acc_state, set_kph = _V229_ACC_STATE_ON, 0.0
+      accel_min, accel_max = _V229_PRIME_ACCEL
+      jerk_min, jerk_max = _V229_PRIME_JERK
 
     counter = (int(self.frame) // 2) % 8
     for powertrain in (False, True):
@@ -1438,7 +1423,7 @@ class CarController(CarControllerBase):
 
 
     self._refresh_cached_params()
-    self._v229_owner_now = self._v229_compute_owner(CC, CS)
+    self._v229_owner_now = self._v229_compute_owner(CS)
     native_alc_turn = self._native_alc_virtual_hold(CC, CS)
     # V223: direct longitudinal owner request follows OP's independent stalk latch,
     # not native TACC. Both pandas independently require fresh real pedal/brake/AP
