@@ -112,6 +112,26 @@ class TestXnorHybridPandaPacket(unittest.TestCase):
     self.assertEqual(self.safety.safety_fwd_hook_pkt(2, newer), 0)
     self.assertEqual(payload(newer), native)
 
+  def test_disengaged_v229_priming_is_bounded_and_only_overlays_native_carrier(self):
+    # Restored V229 parity: while selected but not controls_allowed, a strictly
+    # bounded 0 kph priming template may be cached and substituted onto the
+    # genuine AP carrier. The userspace frame itself remains blocked from CAN.
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.safety_tx_hook(self.carrier()))
+
+    prime = self.das(bus=0, set_speed=0, accel_min=-1.4, accel_max=1.8)
+    self.assertFalse(self.safety.safety_tx_hook(prime))
+
+    native = self.das(bus=2, set_speed=60, accel_min=0.0, accel_max=0.0)
+    before = payload(native)
+    self.assertEqual(self.safety.safety_fwd_hook_pkt(2, native), 0)
+    after = payload(native)
+
+    self.assertNotEqual(after, before)
+    self.assertEqual(after[0], 0)
+    self.assertEqual(after[1] & 0x0F, 0)  # 12-bit DAS_setSpeed remains 0 kph
+    self.assertEqual(after[2] & 0x03, 0)  # OP never authors AEB
+
   def test_injected_aeb_event_always_rejected(self):
     self.safety.set_controls_allowed(True)
     for event in (1, 2, 3):
