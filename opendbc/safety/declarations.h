@@ -219,12 +219,15 @@ typedef safety_config (*safety_hook_init)(uint16_t param);
 typedef void (*rx_hook)(const CANPacket_t *msg);
 typedef bool (*tx_hook)(const CANPacket_t *msg);  // returns true if the message is allowed
 typedef bool (*fwd_hook)(int bus_num, int addr);      // returns true if the message should be blocked from forwarding
+// XNOR 0.11.2 Hybrid: inspect/transform only the forwarded copy of a valid RX packet.
+typedef bool (*fwd_msg_hook)(int bus_num, CANPacket_t *to_fwd);
 
 typedef struct {
   safety_hook_init init;
   rx_hook rx;
   tx_hook tx;
   fwd_hook fwd;
+  fwd_msg_hook fwd_msg;
   get_checksum_t get_checksum;
   compute_checksum_t compute_checksum;
   get_counter_t get_counter;
@@ -261,6 +264,9 @@ extern bool gas_pressed;
 extern bool gas_pressed_prev;
 extern bool brake_pressed;
 extern bool brake_pressed_prev;
+// Tesla Hybrid may retain lateral-only ownership across a verified brake press;
+// this never permits longitudinal actuation and is scoped to Tesla safety.
+extern bool tesla_hybrid_brake_lateral_only;
 extern bool regen_braking;
 extern bool regen_braking_prev;
 extern bool steering_disengage;
@@ -337,6 +343,9 @@ extern uint16_t current_safety_param;
 extern safety_config current_safety_config;
 
 int safety_fwd_hook(int bus_num, int addr);
+// Packet-aware entry for firmware forwarding. Keep the address-only ABI for
+// existing opendbc safety tests and non-Panda consumers.
+int safety_fwd_hook_pkt(int bus_num, CANPacket_t *to_fwd);
 int set_safety_hooks(uint16_t mode, uint16_t param);
 
 extern const safety_hooks body_hooks;

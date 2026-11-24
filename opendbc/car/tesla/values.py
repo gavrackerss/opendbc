@@ -179,6 +179,30 @@ GEAR_MAP = {
 }
 
 
+# Staged read-only Tesla migration (not linked to the active opendbc gitlink).
+# Keep XNOR's native AngleSteeringLimitsVM safety envelope and legacy safety
+# flags intact: CruiseButtons and curve-assist constants are inert definitions.
+# They are not consumed by native CarController without a separate port.
+
+class CruiseButtons:
+  """SpdCtrlLvr_Stat values (tesla_can.dbc STW_ACTN_RQ)."""
+  IDLE = 0
+  CANCEL = 1      # FWD
+  MAIN = 2        # RWD
+  RES_ACCEL_2ND = 4
+  DECEL_2ND = 8
+  RES_ACCEL = 16
+  DECEL_SET = 32
+
+  @classmethod
+  def is_accel(cls, btn: int) -> bool:
+    return btn in (cls.RES_ACCEL, cls.RES_ACCEL_2ND)
+
+  @classmethod
+  def is_decel(cls, btn: int) -> bool:
+    return btn in (cls.DECEL_SET, cls.DECEL_2ND)
+
+
 class CarControllerParams:
   ANGLE_LIMITS: AngleSteeringLimitsVM = AngleSteeringLimitsVM(
     # EPAS faults above this angle
@@ -186,6 +210,15 @@ class CarControllerParams:
     # limit angle rate to both prevent a fault and for low speed comfort (~12 mph rate down to 0 mph)
     MAX_ANGLE_RATE=5,  # deg/20ms frame, EPS faults at 12 at a standstill
   )
+
+  # Curvature-aware lane-positioning bias.
+  CURVE_ASSIST_ANGLE_BP = [0.0, 4.0, 10.0, 18.0]
+  CURVE_ASSIST_GAIN_V = [1.00, 1.005, 1.015, 1.025]
+  CURVE_ASSIST_EXTRA_DEG_V = [0.0, 0.03, 0.18, 0.40]
+  CURVE_ASSIST_SPEED_BP = [0.0, 8.0, 15.0, 25.0, 35.0]
+  CURVE_ASSIST_SPEED_GAIN_V = [0.0, 0.25, 0.45, 0.60, 0.70]
+  CURVE_ASSIST_MAX_DELTA_BP = [0.0, 10.0, 20.0, 30.0]
+  CURVE_ASSIST_MAX_DELTA_V = [0.3, 0.6, 1.0, 1.8]
 
   STEER_STEP = 2  # Angle command is sent at 50 Hz
   ACCEL_MAX = 2.0    # m/s^2
@@ -206,6 +239,11 @@ class TeslaSafetyFlags(IntFlag):
   FLAG_HW1 = 8
   FLAG_HW2 = 16
   FLAG_HW3 = 32
+  # Hybrid Panda internal stalk owner, 0x659 carrier (not stock XNOR firmware).
+  OP_STALK_ENABLE = 64
+  # Legacy HUD warning option; genuine AEB braking still takes absolute priority
+  # in the candidate packet-aware dispatcher.
+  IGNORE_STOCK_AEB = 128
 
 
 class TeslaFlags(IntFlag):

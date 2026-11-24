@@ -11,6 +11,7 @@
 #include "opendbc/safety/modes/honda.h"
 #include "opendbc/safety/modes/toyota.h"
 #include "opendbc/safety/modes/tesla.h"
+#include "opendbc/safety/modes/tesla_legacy_native_0112.h"
 #include "opendbc/safety/modes/tesla_legacy.h"
 #include "opendbc/safety/modes/gm.h"
 #include "opendbc/safety/modes/ford.h"
@@ -50,6 +51,7 @@ bool gas_pressed = false;
 bool gas_pressed_prev = false;
 bool brake_pressed = false;
 bool brake_pressed_prev = false;
+bool tesla_hybrid_brake_lateral_only = false;
 bool regen_braking = false;
 bool regen_braking_prev = false;
 bool steering_disengage;
@@ -262,7 +264,17 @@ static int get_fwd_bus(int bus_num) {
   return destination_bus;
 }
 
+// Preserve the upstream address-only forwarding ABI for all existing tests and
+// safety modes. Panda's firmware RX drivers use safety_fwd_hook_pkt below.
 int safety_fwd_hook(int bus_num, int addr) {
+  // In explicit Hybrid mode, 0x659 is a private safety-control carrier,
+  // NEVER a vehicle frame. Native unselected Tesla mode retains XNOR's
+  // original address-only forward semantics for existing safety contracts.
+  // CAN frame. Deny in BOTH forwarding ABIs (old address-only tests
+  // and new packet-aware hardware drivers), including on external Panda.
+  if (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_hybrid_extension_active && addr == 0x659) {
+    return -1;
+  }
   bool blocked = relay_malfunction || current_safety_config.disable_forwarding;
 
   // Block messages that are being checked for relay malfunctions. Safety modes can opt out of this
@@ -283,6 +295,38 @@ int safety_fwd_hook(int bus_num, int addr) {
   }
 
   return blocked ? -1 : destination_bus;
+}
+
+// XNOR 0.11.2 HW2 Hybrid: packet-aware forwarding, preserving the original
+// address-only entry for third-party safety test runners. All routing, relay
+// malfunction and stock forwarding checks run BEFORE any Tesla packet rewrite.
+// A mutation may change only the CAN payload, never message identity/routing.
+int safety_fwd_hook_pkt(int bus_num, CANPacket_t *to_fwd) {
+  if (to_fwd == NULL) {
+    return -1;
+  }
+  const int destination_bus = safety_fwd_hook(bus_num, (int)to_fwd->addr);
+  if (destination_bus < 0) {
+    return -1;
+  }
+  if (current_hooks->fwd_msg != NULL) {
+    const CANPacket_t before = *to_fwd;
+    // Genuine physical AEB is untouchable on either DAS_control address.
+    // AEB event == 1 is an active intervention; 2/3 are warning/fault states.
+    const bool real_aeb = current_safety_mode == SAFETY_TESLA_LEGACY &&
+      bus_num == 2 && ((to_fwd->addr == 0x2B9U) || (to_fwd->addr == 0x2BFU)) &&
+      (GET_LEN(to_fwd) >= 3) && ((to_fwd->data[2] & 0x03U) == 1U);
+    if (real_aeb) {
+      return destination_bus;
+    }
+    const bool block = current_hooks->fwd_msg(bus_num, to_fwd);
+    if (block || (to_fwd->addr != before.addr) || (to_fwd->bus != before.bus) ||
+        (to_fwd->extended != before.extended) || (to_fwd->fd != before.fd) ||
+        (to_fwd->data_len_code != before.data_len_code)) {
+      return -1;
+    }
+  }
+  return destination_bus;
 }
 
 // Given a CRC-8 poly, generate a static lookup table to use with a fast CRC-8
@@ -353,19 +397,40 @@ static void relay_malfunction_set(void) {
 static void generic_rx_checks(void) {
   gas_pressed_prev = gas_pressed;
 
-  // exit controls on rising edge of brake press
-  if (brake_pressed && (!brake_pressed_prev || vehicle_moving)) {
-    controls_allowed = false;
+  // Tesla HW2 Hybrid: a *previously engaged* and independently stalk-owned
+  // lateral session may remain active when the physical brake/regen is held.
+  // This does NOT override get_longitudinal_allowed(), which continues to
+  // prohibit active longitudinal actuation during brake/regen.
+  // Scope the exception to Tesla, fresh 0x659 ownership, and no stock AEB.
+  const uint32_t now = microsecond_timer_get();
+  const bool hybrid_lateral_eligible =
+    current_safety_mode == SAFETY_TESLA_LEGACY &&
+    tesla_hybrid_extension_active && tesla_legacy_op_hybrid_native_ap && tesla_legacy_op_stalk_enable &&
+    tesla_legacy_has_ap_hw && !tesla_legacy_op_stalk_cancel_edge &&
+    tesla_legacy_v221_owner_request_us != 0U &&
+    safety_get_ts_elapsed(now, tesla_legacy_v221_owner_request_us) <= 150000U &&
+    controls_allowed && !tesla_legacy_stock_aeb;
+  tesla_hybrid_brake_lateral_only =
+    hybrid_lateral_eligible && (brake_pressed || regen_braking);
+
+  // A stale/untrusted owner or actual stock AEB always restores the native
+  // disengagement rule. Check every RX cycle, not just a rising edge.
+  if (brake_pressed && (!brake_pressed_prev || vehicle_moving ||
+      (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_hybrid_extension_active && tesla_legacy_op_hybrid_native_ap))) {
+    if (!tesla_hybrid_brake_lateral_only) {
+      controls_allowed = false;
+    }
   }
   brake_pressed_prev = brake_pressed;
 
-  // exit controls on rising edge of regen paddle
-  if (regen_braking && (!regen_braking_prev || vehicle_moving)) {
-    controls_allowed = false;
+  if (regen_braking && (!regen_braking_prev || vehicle_moving ||
+      (current_safety_mode == SAFETY_TESLA_LEGACY && tesla_hybrid_extension_active && tesla_legacy_op_hybrid_native_ap))) {
+    if (!tesla_hybrid_brake_lateral_only) {
+      controls_allowed = false;
+    }
   }
   regen_braking_prev = regen_braking;
 
-  // exit controls on rising edge of steering override/disengage
   if (steering_disengage && !steering_disengage_prev) {
     controls_allowed = false;
   }
@@ -435,6 +500,7 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
   gas_pressed_prev = false;
   brake_pressed = false;
   brake_pressed_prev = false;
+  tesla_hybrid_brake_lateral_only = false;
   regen_braking = false;
   regen_braking_prev = false;
   steering_disengage = false;

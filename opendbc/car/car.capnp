@@ -176,6 +176,8 @@ struct CarState {
 
   gasPressed @4 :Bool;    # this is user pedal only
 
+  # Native deprecated group already defines brake @5. Do not duplicate
+  # the field at the CarState root: Cap'n Proto ordinals share a namespace.
   brakePressed @6 :Bool;  # this is user pedal only
   regenBraking @45 :Bool; # this is user pedal only
   parkingBrake @39 :Bool;
@@ -217,6 +219,14 @@ struct CarState {
   leftBlinker @20 :Bool;
   rightBlinker @21 :Bool;
   genericToggle @23 :Bool;
+  # Tesla Hybrid fields use NEW non-conflicting IDs. Native carNotReady @61
+  # must remain unchanged; the installed Tesla fork incorrectly reused @61.
+  adaptiveCruiseEnabled @62 :Bool;
+  teslaAlcHandoverReady @63 :Bool;
+  teslaEacStatus @64 :UInt8;
+  teslaEacError @65 :UInt8;
+  followDistanceS @66 :UInt8;  # 255 unknown/SNA, 0..6 selected distance
+
 
   # lock info
   doorOpen @24 :Bool;           # ideally includes all doors

@@ -12,6 +12,27 @@ class CarInterface(CarInterfaceBase):
   RadarInterface = RadarInterface
 
   @staticmethod
+  def _hybrid_selection() -> tuple[bool, bool, bool]:
+    """Read only persistent Tesla configuration; this is not an authority signal.
+
+    The packet heartbeat and the hardware-specific safety dispatcher still
+    determine steering/longitudinal ownership independently.
+    """
+    # Standalone opendbc unit tests may not have compiled openpilot Params.
+    # Fall back to *no Hybrid request*, never an assumed ownership grant.
+    try:
+      from openpilot.common.params import Params
+      p = Params()
+    except (ImportError, OSError):
+      return False, False, False
+    disabled = bool(p.get_bool("TinklaAutopilotDisabled"))
+    hybrid = bool(p.get_bool("TinklaHybridNativeAP")) and not disabled
+    # Do not suppress stock AEB warnings in this unqualified native port.
+    # The historical HUD override and native DAS_lssState layouts conflict.
+    ignore_hud_aeb = False
+    return disabled, hybrid, ignore_hud_aeb
+
+  @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:
     if candidate in LEGACY_CARS:
       return CarInterface._get_params_sx(ret, candidate, fingerprint, car_fw, alpha_long, is_release, docs)
@@ -81,8 +102,25 @@ class CarInterface(CarInterfaceBase):
     ret.radarUnavailable = candidate in (CAR.TESLA_MODEL_S_HW2, )
 
     ret.alphaLongitudinalAvailable = True
+    # Legacy HW1/HW2/HW3 uses two distinct PANDA safety contexts for HW2/3.
+    # Both require LONG_CONTROL. The stock XNOR interface set it only on the
+    # main Panda, leaving the external 0x2BF sender without matching ownership.
     ret.openpilotLongitudinalControl = True
-    ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
+    autopilot_disabled, hybrid_native_ap, ignore_hud_aeb = CarInterface._hybrid_selection()
+    ret.pcmCruise = hybrid_native_ap
+    for cfg in ret.safetyConfigs:
+      cfg.safetyParam |= int(TeslaSafetyFlags.LONG_CONTROL)
+      if autopilot_disabled or hybrid_native_ap:
+        cfg.safetyParam |= int(TeslaSafetyFlags.OP_STALK_ENABLE)
+      if ignore_hud_aeb:
+        cfg.safetyParam |= int(TeslaSafetyFlags.IGNORE_STOCK_AEB)
+
+    # Independent safety checks still gate actual longitudinal control.
+    ret.minEnableSpeed = -1.
+    # vEgoStopping/vEgoStarting/stoppingDecelRate are deprecated group
+    # members in pinned 0.11.2 capnp; setting them as root fields causes
+    # CarInterface.get_non_essential_params() to raise AttributeError.
+    # Use the native 0.11.2 longitudinal defaults until replay-qualified.
 
     # ret.dashcamOnly = candidate in (CAR.TESLA_MODEL_X) # dashcam only, pending find invalidLkasSetting signal
 
