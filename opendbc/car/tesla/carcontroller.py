@@ -147,7 +147,7 @@ def _v226_powertrain_tx_allowed(hybrid_native_ap: bool, exclusive_hybrid_selecte
 class CarController(CarControllerBase):
   def __new__(cls, dbc_names, CP, VM=None):
     # Preserve native XNOR 0.11.2 non-legacy vehicle actuation without regressions.
-    if cls is CarController and CP.carFingerprint not in LEGACY_CARS:
+    if cls is CarController and (CP.carFingerprint not in LEGACY_CARS or CP.carFingerprint == CAR.TESLA_MODEL_S_HW3):
       from opendbc.car.tesla.carcontroller_native_0112 import CarController as NativeCarController
       return NativeCarController(dbc_names, CP)
     return super().__new__(cls)

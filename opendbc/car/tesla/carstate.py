@@ -43,7 +43,7 @@ class _TinklaConfig:
 
 class CarState(CarStateBase):
   def __new__(cls, CP):
-    if cls is CarState and CP.carFingerprint not in LEGACY_CARS:
+    if cls is CarState and (CP.carFingerprint not in LEGACY_CARS or CP.carFingerprint == CAR.TESLA_MODEL_S_HW3):
       from opendbc.car.tesla.carstate_native_0112 import CarState as NativeCarState
       return NativeCarState(CP)
     return super().__new__(cls)
