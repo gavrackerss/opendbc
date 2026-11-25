@@ -44,8 +44,7 @@ from opendbc.can import CANPacker
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarControllerBase
-from opendbc.car.lateral import apply_steer_angle_limits_vm
-from opendbc.car.vehicle_model import VehicleModel
+from opendbc.car.lateral import apply_std_steer_angle_limits
 
 from opendbc.car.tesla.teslacan import TeslaCAN
 try:
@@ -83,7 +82,7 @@ _ARM_ENABLE_STALK = False    # OFF (isolate GTW MITM test)
 # Unity-style stop/go: author a chassis 0x2B9 TEMPLATE only. Panda captures it, blocks direct TX,
 # and overlays it onto the genuine AP 0x2B9 as that frame crosses bus2->bus0, preserving stock
 # cadence/counter. This is intentionally different from _ARM_ENABLE_CHASSIS (unsolicited direct TX).
-_UNITY_2B9_OVERLAY_TEMPLATE = False
+_UNITY_2B9_OVERLAY_TEMPLATE = True
 # Legacy 0x399/0x389 warning suppression is disabled until native
 # DAS_lssState 0x389 and genuine AEB/PMM HUD behaviour are replay-qualified.
 _ALLOW_LEGACY_HUD_WARNING_OVERLAY = True
@@ -96,7 +95,7 @@ _ALLOW_LEGACY_HUD_WARNING_OVERLAY = True
 # all other config bytes identical, no checksum/counter on 0x398). Set False to disable.
 # WATCH: does AutopilotStatus(0x399) climb UNAVAILABLE(1) -> AVAILABLE(2)? If yes, config is read
 # live and AP/sub-18 is reachable. If it stays UNAVAILABLE with ap=2 native on bus2 => NVRAM-gated.
-_GTW_TX_AUTOPILOT2_BUS2 = False
+_GTW_TX_AUTOPILOT2_BUS2 = True
 _GTW_CARCONFIG_AP2_PAYLOAD = bytes.fromhex("6987474215320020")
 
 ROADWORKS_CAP_FILE = "/data/xnor_roadworks_speed_cap_kph.txt"
@@ -159,10 +158,6 @@ class CarController(CarControllerBase):
 
     self.CP = CP
     self.frame = 0
-    # Native XNOR steering safety uses VM jerk and lateral acceleration bounds.
-    from opendbc.car.tesla.interface import CarInterface
-    self.VM = VehicleModel(CarInterface.get_non_essential_params("TESLA_MODEL_S_HW3"))
-
     if Params is None:
       raise RuntimeError("Tesla Hybrid controller requires the full openpilot Params runtime")
     # LONG/ACC import the running cereal transport; only initialise on
@@ -1859,14 +1854,13 @@ class CarController(CarControllerBase):
           float(CS.out.steeringAngleDeg),
           float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
         )
-        apply_angle = float(apply_steer_angle_limits_vm(
+        apply_angle = float(apply_std_steer_angle_limits(
           float(desired_angle),
           float(self.apply_angle_last),
           float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
           float(CS.out.steeringAngleDeg),
           lat_active,
-          CarControllerParams,
-          self.VM,
+          CarControllerParams.ANGLE_LIMITS,
         ))
         steer_guard_deg = float(np.interp(
           float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
