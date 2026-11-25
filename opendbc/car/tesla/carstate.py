@@ -228,6 +228,7 @@ class CarState(CarStateBase):
     self.blinker_controller = BLNKController()
     self.alca_controller = ALCController()
     self.hso_controller = HSOController()
+    self.ic_model_data = None
     self._alc_plan_services = [s for s in ("modelV2", "lateralPlan") if s in messaging.SERVICE_LIST]
     self._alc_sm = messaging.SubMaster(self._alc_plan_services, ignore_avg_freq=True) if self._alc_plan_services else None
     self._vego_nan_logged = False
@@ -316,10 +317,22 @@ class CarState(CarStateBase):
   def _update_alc_state_from_plan(self, enabled: bool) -> None:
     # CarState is the SOLE ALC state owner. Do not use a second modelV2 socket in
     # CarInterface: a 100Hz empty poll can otherwise erase a valid 20Hz model phase.
+    # 0.11.1 also retained the last good modelV2 lane/path sample for the IC lane
+    # overlay; preserve that behaviour from this same subscriber.
     plan_msg = None
     if self._alc_sm is not None:
       try:
         self._alc_sm.update(0)
+        if "modelV2" in self._alc_plan_services and self._alc_sm.updated["modelV2"]:
+          model_v2 = self._alc_sm["modelV2"]
+          try:
+            self.ic_model_data = {
+              "lane_probs": tuple(float(v) for v in model_v2.laneLineProbs),
+              "position_x": tuple(float(v) for v in model_v2.position.x),
+              "position_y": tuple(float(v) for v in model_v2.position.y),
+            }
+          except Exception:
+            pass
         for service in ("modelV2", "lateralPlan"):
           if service in self._alc_plan_services and self._alc_sm.updated[service]:
             plan_msg = self._alc_sm[service]
@@ -327,6 +340,19 @@ class CarState(CarStateBase):
       except Exception:
         pass
     self.alca_controller.update(bool(enabled), self, self._param_frame, plan_msg)
+
+  def _apply_legacy_alc_engagement_nudge(self, ret: structs.CarState) -> None:
+    # 0.11.1 CarInterface.post_update parity. In non-Hybrid mode ALC used this
+    # synthetic steeringPressed/torque nudge after the configured preLaneChange
+    # delay to let the planner progress. Hybrid ALC remains independent.
+    if not self.enableALC or self.hybrid_native_ap or not bool(getattr(self, "alca_need_engagement", False)):
+      return
+    ret.steeringPressed = True
+    direction = int(getattr(self, "alca_direction", 0) or 0)
+    if direction == 1:
+      ret.steeringTorque = 2.0
+    elif direction == 2:
+      ret.steeringTorque = -2.0
 
   def _update_native_alc_state(self, cp_ap_pt) -> None:
     # Diagnostics only, never an OP lane-change or steering-authority gate.
@@ -1310,6 +1336,7 @@ class CarState(CarStateBase):
     self.HSOSteeringPressed = bool(getattr(self, "hands_on_level", 0.0) >= float(self._tinkla.hands_on_level))
     if self.enableHSO and not (ret.leftBlinker or ret.rightBlinker):
       ret.steeringPressed = self.HSOSteeringPressed
+    self._apply_legacy_alc_engagement_nudge(ret)
 
     # Seatbelt
     ret.seatbeltUnlatched = cp_party.vl["UI_warning"]["buckleStatus"] != 1
@@ -1663,6 +1690,7 @@ class CarState(CarStateBase):
     self.HSOSteeringPressed = bool(getattr(self, "hands_on_level", 0.0) >= float(self._tinkla.hands_on_level))
     if self.enableHSO and not (ret.leftBlinker or ret.rightBlinker):
       ret.steeringPressed = self.HSOSteeringPressed
+    self._apply_legacy_alc_engagement_nudge(ret)
 
     # Seatbelt
     if self.CP.flags & TeslaLegacyParams.NO_SDM1:
