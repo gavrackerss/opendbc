@@ -210,7 +210,7 @@ class CarControllerParams:
     ([0., 5., 15.], [11.5, 11.5, 6.2]),
   )
 
-  # Curvature-aware lane-positioning bias from 0.11.1.
+  # Curvature-aware lane-positioning bias from the working 0.11.1 XNOR tree.
   CURVE_ASSIST_ANGLE_BP = [0.0, 4.0, 10.0, 18.0]
   CURVE_ASSIST_GAIN_V = [1.00, 1.005, 1.015, 1.025]
   CURVE_ASSIST_EXTRA_DEG_V = [0.0, 0.03, 0.18, 0.40]
@@ -225,6 +225,10 @@ class CarControllerParams:
   JERK_LIMIT_MAX = 4.9
   JERK_LIMIT_MIN = -4.9
   JERK_RAMP_RATE = JERK_LIMIT_MAX * 0.002
+
+
+class TeslaLegacyParams(IntFlag):
+  NO_SDM1 = 1
 
 
 class TeslaSafetyFlags(IntFlag):
