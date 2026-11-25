@@ -41,6 +41,16 @@ class _TinklaConfig:
   enable_acc: bool = False
 
 
+def _hybrid_steer_fault_temporary(hybrid_native_ap: bool, eac_status: str | None,
+                                  eac_error_code: str | None, epas_failed: bool = False) -> bool:
+  """Classify Tesla EPAS temporary faults without treating Hybrid hands-on takeover as a fault."""
+  if epas_failed:
+    return True
+  if eac_status != "EAC_INHIBITED":
+    return False
+  return not (hybrid_native_ap and eac_error_code == "EAC_ERROR_HANDS_ON")
+
+
 class CarState(CarStateBase):
   def __new__(cls, CP):
     if cls is CarState and (CP.carFingerprint not in LEGACY_CARS or CP.carFingerprint == CAR.TESLA_MODEL_S_HW3):
@@ -1562,18 +1572,20 @@ class CarState(CarStateBase):
     ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
 
     eac_status = self.can_defines["EPAS_sysStatus"]["EPAS_eacStatus"].get(int(epas_status["EPAS_eacStatus"]), None)
+    eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
-    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
-    # V203: userspace detected a timed-out co-op/native-drop re-arm. This must
-    # surface through the existing normal OP steering-fault alert/disengage path.
-    if self.hybrid_native_ap and bool(self._xnor_hybrid_epas_failed):
-      ret.steerFaultTemporary = True
+    # Hybrid hands-on takeover legitimately reports EAC_INHIBITED/EAC_ERROR_HANDS_ON.
+    # Treat that as driver override, not a temporary steering fault. Preserve every
+    # other inhibit plus V203's explicit failed-rearm fault path.
+    ret.steerFaultTemporary = _hybrid_steer_fault_temporary(
+      bool(self.hybrid_native_ap), eac_status, eac_error_code,
+      bool(self._xnor_hybrid_epas_failed),
+    )
 
     # V182 Hybrid co-op: driver hands-on/torque is an override, never a disengage. Keep the
     # existing hard EPAS high-angle-rate safety disengage; only suppress the handsOnLevel>=3
     # disengage path while Hybrid is selected. This matches the co-op native firmware behaviour
     # without hiding a genuine EAC inhibit/fault.
-    eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
     if self.hybrid_native_ap or self.enableHSO:
       ret.steeringDisengage = (eac_status == "EAC_INHIBITED" and
                                                          eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")

@@ -4,6 +4,7 @@ import unittest
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.structs import CarParams
 from opendbc.car.tesla.interface import CarInterface
+from opendbc.car.tesla.carstate import _hybrid_steer_fault_temporary
 from opendbc.car.tesla.fingerprints import FW_VERSIONS
 from opendbc.car.tesla.radar_interface import RADAR_START_ADDR
 from opendbc.car.tesla.values import CAR, FSD_14_FW
@@ -122,3 +123,29 @@ class TestTeslaFingerprint(unittest.TestCase):
         fingerprint[1][RADAR_START_ADDR] = 8
       CP = CarInterface.get_params(CAR.TESLA_MODEL_X, fingerprint, [], False, False, False)
       assert CP.radarUnavailable  # Always unavailable since no radar DBC
+
+class TestTeslaHybridSteeringFaults(unittest.TestCase):
+  def test_hands_on_inhibit_is_override_only_in_hybrid(self):
+    self.assertTrue(_hybrid_steer_fault_temporary(
+      False, "EAC_INHIBITED", "EAC_ERROR_HANDS_ON",
+    ))
+    self.assertFalse(_hybrid_steer_fault_temporary(
+      True, "EAC_INHIBITED", "EAC_ERROR_HANDS_ON",
+    ))
+
+  def test_real_inhibits_remain_faults_in_hybrid(self):
+    self.assertTrue(_hybrid_steer_fault_temporary(
+      True, "EAC_INHIBITED", "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY",
+    ))
+    self.assertTrue(_hybrid_steer_fault_temporary(
+      True, "EAC_INHIBITED", "EAC_ERROR_TMP_FAULT",
+    ))
+
+  def test_failed_rearm_still_forces_temporary_fault(self):
+    self.assertTrue(_hybrid_steer_fault_temporary(
+      True, "EAC_ACTIVE", "EAC_ERROR_IDLE", epas_failed=True,
+    ))
+    self.assertFalse(_hybrid_steer_fault_temporary(
+      True, "EAC_ACTIVE", "EAC_ERROR_IDLE",
+    ))
+
