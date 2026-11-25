@@ -1860,7 +1860,7 @@ class CarController(CarControllerBase):
           float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
           float(CS.out.steeringAngleDeg),
           lat_active,
-          CarControllerParams.ANGLE_LIMITS,
+          CarControllerParams.LEGACY_ANGLE_LIMITS,
         ))
         steer_guard_deg = float(np.interp(
           float(getattr(CS.out, "vEgoRaw", CS.out.vEgo)),
