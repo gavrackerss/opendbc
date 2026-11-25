@@ -116,7 +116,7 @@ static const char tesla_v224_aeb_state_marker[] __attribute__((used)) = "XNOR_V2
 // The native 0.11.2 port must not cut genuine GTW configuration traffic.
 // The old fork enabled this experimental branch even though its commentary
 // explicitly described it as bench-only and not suitable for normal Hybrid.
-#define TESLA_LEGACY_MITM_BLOCK_STOCK_GTW 0
+#define TESLA_LEGACY_MITM_BLOCK_STOCK_GTW 1
 
 // --- Unity timing ---
 static const uint32_t TESLA_LEGACY_TIME_TO_HIDE_ERRORS_US __attribute__((unused)) = 4000000U;

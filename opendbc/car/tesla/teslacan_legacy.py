@@ -184,7 +184,10 @@ class TeslaCANRaven:
       "DAS_pmmSysFaultReason": 0,
       "DAS_pmmCameraFaultReason": 0,
       "DAS_ACC_report": 1,
-      "DAS_csaState": 2,                                     # CSA_EXTERNAL_STATE_ENABLE (Unity, engaged)
+      # 0.11.1 encoded DAS_csaState=2 at bits 32..33 while bit31 was
+      # DAS_relaxCruiseLimits=0. 0.11.2 names bits31..33 DAS_lssState; raw
+      # lssState=4 produces the exact same three on-wire bits (100b).
+      "DAS_lssState": 4,
       "DAS_radarTelemetry": 1,                               # RADAR_TELEMETRY_NORMAL (Unity)
       "DAS_robState": 2,                                     # ROB_STATE_ACTIVE
       "DAS_driverInteractionLevel": 0,

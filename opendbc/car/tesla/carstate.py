@@ -41,6 +41,16 @@ class _TinklaConfig:
   enable_acc: bool = False
 
 
+def _hybrid_steer_fault_temporary(hybrid_native_ap: bool, eac_status: str | None,
+                                  eac_error_code: str | None, epas_failed: bool = False) -> bool:
+  """Classify Tesla EPAS temporary faults without treating Hybrid hands-on takeover as a fault."""
+  if epas_failed:
+    return True
+  if eac_status != "EAC_INHIBITED":
+    return False
+  return not (hybrid_native_ap and eac_error_code == "EAC_ERROR_HANDS_ON")
+
+
 class CarState(CarStateBase):
   def __new__(cls, CP):
     if cls is CarState and (CP.carFingerprint not in LEGACY_CARS or CP.carFingerprint == CAR.TESLA_MODEL_S_HW3):
@@ -228,6 +238,7 @@ class CarState(CarStateBase):
     self.blinker_controller = BLNKController()
     self.alca_controller = ALCController()
     self.hso_controller = HSOController()
+    self.ic_model_data = None
     self._alc_plan_services = [s for s in ("modelV2", "lateralPlan") if s in messaging.SERVICE_LIST]
     self._alc_sm = messaging.SubMaster(self._alc_plan_services, ignore_avg_freq=True) if self._alc_plan_services else None
     self._vego_nan_logged = False
@@ -316,10 +327,22 @@ class CarState(CarStateBase):
   def _update_alc_state_from_plan(self, enabled: bool) -> None:
     # CarState is the SOLE ALC state owner. Do not use a second modelV2 socket in
     # CarInterface: a 100Hz empty poll can otherwise erase a valid 20Hz model phase.
+    # 0.11.1 also retained the last good modelV2 lane/path sample for the IC lane
+    # overlay; preserve that behaviour from this same subscriber.
     plan_msg = None
     if self._alc_sm is not None:
       try:
         self._alc_sm.update(0)
+        if "modelV2" in self._alc_plan_services and self._alc_sm.updated["modelV2"]:
+          model_v2 = self._alc_sm["modelV2"]
+          try:
+            self.ic_model_data = {
+              "lane_probs": tuple(float(v) for v in model_v2.laneLineProbs),
+              "position_x": tuple(float(v) for v in model_v2.position.x),
+              "position_y": tuple(float(v) for v in model_v2.position.y),
+            }
+          except Exception:
+            pass
         for service in ("modelV2", "lateralPlan"):
           if service in self._alc_plan_services and self._alc_sm.updated[service]:
             plan_msg = self._alc_sm[service]
@@ -327,6 +350,19 @@ class CarState(CarStateBase):
       except Exception:
         pass
     self.alca_controller.update(bool(enabled), self, self._param_frame, plan_msg)
+
+  def _apply_legacy_alc_engagement_nudge(self, ret: structs.CarState) -> None:
+    # 0.11.1 CarInterface.post_update parity. In non-Hybrid mode ALC used this
+    # synthetic steeringPressed/torque nudge after the configured preLaneChange
+    # delay to let the planner progress. Hybrid ALC remains independent.
+    if not self.enableALC or self.hybrid_native_ap or not bool(getattr(self, "alca_need_engagement", False)):
+      return
+    ret.steeringPressed = True
+    direction = int(getattr(self, "alca_direction", 0) or 0)
+    if direction == 1:
+      ret.steeringTorque = 2.0
+    elif direction == 2:
+      ret.steeringTorque = -2.0
 
   def _update_native_alc_state(self, cp_ap_pt) -> None:
     # Diagnostics only, never an OP lane-change or steering-authority gate.
@@ -519,32 +555,62 @@ class CarState(CarStateBase):
 
     self._prev_pull_button = int(btn)
 
-  def _pick_stock_cruise_set_u(self, di_state: dict, v_ego_ms: float,
-                               cruise_enabled: bool, speed_units: str) -> tuple[float, str]:
-    """Interpret exactly the PINNED XNOR 0.11.2 DI_state DBC (CAN 0x368).
+  def _pick_stock_cruise_set_u(self, di_state: dict, v_ego_ms: float, cruise_enabled: bool, speed_units: str) -> tuple[float, str]:
+    """0.11.1 legacy Model S/X cruise-set interpretation.
 
-    Native DI_cruiseSet is 32|9@1+ with factor 0.5 and DI_digitalSpeed
-    is 48|8@1+. CANParser applies that factor: the earlier heuristic
-    scaling by 2 could double a correct set speed.
-
-    Do not infer vehicle DBC layout from plausible values. Real 0x368
-    captures are a deployment prerequisite.
+    Legacy HW2 DI_state uses digital speed at 32|8 and cruise SET at 48|8.
+    The 0.11.2 native Tesla DBC uses those locations differently, so consume
+    the explicit XNOR legacy aliases and retain the proven 1x/2x plausibility
+    check from the working 0.11.1 tree.
     """
     try:
-      set_u = float(di_state.get("DI_cruiseSet", 0.0) or 0.0)
-      speed_u = float(di_state.get("DI_digitalSpeed", 0.0) or 0.0)
-    except (ValueError, TypeError, OverflowError):
-      return 0.0, "invalid"
-    if not math.isfinite(set_u) or not math.isfinite(speed_u):
-      return 0.0, "nonfinite"
-    if cruise_enabled:
-      if 0.0 < set_u <= 255.5:
-        return set_u, "DI_cruiseSet_native_0112"
-      # Do not confuse dash speed with stock cruise set speed.
-      return 0.0, "DI_cruiseSet_unavailable"
-    if 0.0 < speed_u <= 250.0:
-      return speed_u, "DI_digitalSpeed_native_0112"
-    return 0.0, "DI_digitalSpeed_unavailable"
+      a = float(di_state.get("XNOR_DI_cruiseSetLegacy", 0.0) or 0.0)
+    except Exception:
+      a = 0.0
+    try:
+      b = float(di_state.get("XNOR_DI_digitalSpeedLegacy", 0.0) or 0.0)
+    except Exception:
+      b = 0.0
+
+    uom = "KPH" if speed_units == "KPH" else "MPH"
+    ms_to_u = CV.MS_TO_KPH if uom == "KPH" else CV.MS_TO_MPH
+    v_u = float(v_ego_ms) * ms_to_u
+    thr = max(2.5, 0.10 * max(v_u, 1.0))
+
+    prev_enabled = bool(getattr(self, "_stock_cruise_enabled_prev", False))
+    if bool(cruise_enabled) and (not prev_enabled) and a > 0.0:
+      if (b > 0.0) and (abs((2.0 * a) - b) <= thr) and (abs(a - b) > thr):
+        self._cruise_set_scale = 2.0
+      elif (abs((2.0 * a) - v_u) <= thr) and (abs(a - v_u) > thr):
+        self._cruise_set_scale = 2.0
+      elif (b > 0.0) and (abs(a - b) <= thr):
+        self._cruise_set_scale = 1.0
+      elif abs(a - v_u) <= thr:
+        self._cruise_set_scale = 1.0
+
+    scale = float(getattr(self, "_cruise_set_scale", 1.0) or 1.0)
+    self._stock_cruise_enabled_prev = bool(cruise_enabled)
+
+    if bool(cruise_enabled):
+      if a > 0.0:
+        val = a * scale
+        src = "XNOR_DI_cruiseSetLegacy" if scale < 1.5 else "XNOR_DI_cruiseSetLegacy_x2"
+        return float(val), src
+      if b > 0.0:
+        return float(b), "XNOR_DI_digitalSpeedLegacy"
+      return 0.0, "none"
+
+    if b > 0.0:
+      if (abs((2.0 * b) - v_u) <= thr) and (abs(b - v_u) > thr):
+        return float(2.0 * b), "XNOR_DI_digitalSpeedLegacy_x2"
+      return float(b), "XNOR_DI_digitalSpeedLegacy"
+
+    if a > 0.0:
+      val = a * scale
+      src = "XNOR_DI_cruiseSetLegacy" if scale < 1.5 else "XNOR_DI_cruiseSetLegacy_x2"
+      return float(val), src
+
+    return 0.0, "none"
 
   def _update_cruise_set_speed(
     self,
@@ -571,7 +637,11 @@ class CarState(CarStateBase):
     picked_ms = float(cruise_set_u) * float(conv) if float(cruise_set_u) > 0.0 else 0.0
 
     self._cruise_set_hold_src = ""
-    if bool(raw_cruise_enabled) and picked_ms > 0.1 and str(src).startswith("DI_cruiseSet"):
+    # 0.11.1 parity: a decoded DI cruise-set value is trusted for the
+    # transient-STANDBY hold. 0.11.2 needs explicit legacy aliases because its
+    # native DBC reuses these bit positions differently.
+    trusted_cruise_set = str(src).startswith(("DI_cruiseSet", "XNOR_DI_cruiseSetLegacy"))
+    if bool(raw_cruise_enabled) and picked_ms > 0.1 and trusted_cruise_set:
       self._last_valid_stock_cruise_set_speed_ms = float(picked_ms)
       self._last_valid_stock_cruise_set_ms = int(now_ms)
 
@@ -1276,6 +1346,7 @@ class CarState(CarStateBase):
     self.HSOSteeringPressed = bool(getattr(self, "hands_on_level", 0.0) >= float(self._tinkla.hands_on_level))
     if self.enableHSO and not (ret.leftBlinker or ret.rightBlinker):
       ret.steeringPressed = self.HSOSteeringPressed
+    self._apply_legacy_alc_engagement_nudge(ret)
 
     # Seatbelt
     ret.seatbeltUnlatched = cp_party.vl["UI_warning"]["buckleStatus"] != 1
@@ -1501,18 +1572,20 @@ class CarState(CarStateBase):
     ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > STEER_THRESHOLD, 5)
 
     eac_status = self.can_defines["EPAS_sysStatus"]["EPAS_eacStatus"].get(int(epas_status["EPAS_eacStatus"]), None)
+    eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
     ret.steerFaultPermanent = eac_status == "EAC_FAULT"
-    ret.steerFaultTemporary = eac_status == "EAC_INHIBITED"
-    # V203: userspace detected a timed-out co-op/native-drop re-arm. This must
-    # surface through the existing normal OP steering-fault alert/disengage path.
-    if self.hybrid_native_ap and bool(self._xnor_hybrid_epas_failed):
-      ret.steerFaultTemporary = True
+    # Hybrid hands-on takeover legitimately reports EAC_INHIBITED/EAC_ERROR_HANDS_ON.
+    # Treat that as driver override, not a temporary steering fault. Preserve every
+    # other inhibit plus V203's explicit failed-rearm fault path.
+    ret.steerFaultTemporary = _hybrid_steer_fault_temporary(
+      bool(self.hybrid_native_ap), eac_status, eac_error_code,
+      bool(self._xnor_hybrid_epas_failed),
+    )
 
     # V182 Hybrid co-op: driver hands-on/torque is an override, never a disengage. Keep the
     # existing hard EPAS high-angle-rate safety disengage; only suppress the handsOnLevel>=3
     # disengage path while Hybrid is selected. This matches the co-op native firmware behaviour
     # without hiding a genuine EAC inhibit/fault.
-    eac_error_code = self.can_defines["EPAS_sysStatus"]["EPAS_eacErrorCode"].get(int(epas_status["EPAS_eacErrorCode"]), None)
     if self.hybrid_native_ap or self.enableHSO:
       ret.steeringDisengage = (eac_status == "EAC_INHIBITED" and
                                                          eac_error_code == "EAC_ERROR_HIGH_ANGLE_RATE_SAFETY")
@@ -1629,6 +1702,7 @@ class CarState(CarStateBase):
     self.HSOSteeringPressed = bool(getattr(self, "hands_on_level", 0.0) >= float(self._tinkla.hands_on_level))
     if self.enableHSO and not (ret.leftBlinker or ret.rightBlinker):
       ret.steeringPressed = self.HSOSteeringPressed
+    self._apply_legacy_alc_engagement_nudge(ret)
 
     # Seatbelt
     if self.CP.flags & TeslaLegacyParams.NO_SDM1:

@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from enum import Enum, IntFlag
 from opendbc.car import Bus, CarSpecs, DbcDict, PlatformConfig, Platforms
-from opendbc.car.lateral import AngleSteeringLimitsVM
+from opendbc.car.lateral import AngleSteeringLimits, AngleSteeringLimitsVM
 from opendbc.car.structs import CarParams, CarState
 from opendbc.car.docs_definitions import CarDocs, CarFootnote, CarHarness, CarParts, Column
 from opendbc.car.fw_query_definitions import FwQueryConfig, Request, StdQueries
@@ -204,14 +204,20 @@ class CruiseButtons:
 
 
 class CarControllerParams:
+  # Native 0.11.2 Model 3/Y/Raven safety API remains VM-based.
   ANGLE_LIMITS: AngleSteeringLimitsVM = AngleSteeringLimitsVM(
-    # EPAS faults above this angle
-    360,  # deg
-    # limit angle rate to both prevent a fault and for low speed comfort (~12 mph rate down to 0 mph)
-    MAX_ANGLE_RATE=5,  # deg/20ms frame, EPS faults at 12 at a standstill
+    360,
+    MAX_ANGLE_RATE=5,
   )
 
-  # Curvature-aware lane-positioning bias.
+  # Legacy Model S/X userspace behavior from the working 0.11.1 XNOR tree.
+  # Panda independently keeps the VM safety backstop on the transmitted angle.
+  LEGACY_ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
+    360,
+    ([0., 5., 15.], [11.5, 11.0, 4.6]),
+    ([0., 5., 15.], [11.5, 11.5, 6.2]),
+  )
+
   CURVE_ASSIST_ANGLE_BP = [0.0, 4.0, 10.0, 18.0]
   CURVE_ASSIST_GAIN_V = [1.00, 1.005, 1.015, 1.025]
   CURVE_ASSIST_EXTRA_DEG_V = [0.0, 0.03, 0.18, 0.40]
@@ -220,12 +226,12 @@ class CarControllerParams:
   CURVE_ASSIST_MAX_DELTA_BP = [0.0, 10.0, 20.0, 30.0]
   CURVE_ASSIST_MAX_DELTA_V = [0.3, 0.6, 1.0, 1.8]
 
-  STEER_STEP = 2  # Angle command is sent at 50 Hz
-  ACCEL_MAX = 2.0    # m/s^2
-  ACCEL_MIN = -3.48  # m/s^2
-  JERK_LIMIT_MAX = 4.9  # m/s^3, ACC faults at 5.0
-  JERK_LIMIT_MIN = -4.9  # m/s^3, ACC faults at 5.0
-  JERK_RAMP_RATE = JERK_LIMIT_MAX * 0.002  # m/s^3 per control step, for smooth gas override
+  STEER_STEP = 2
+  ACCEL_MAX = 2.0
+  ACCEL_MIN = -3.48
+  JERK_LIMIT_MAX = 4.9
+  JERK_LIMIT_MIN = -4.9
+  JERK_RAMP_RATE = JERK_LIMIT_MAX * 0.002
 
 
 class TeslaLegacyParams(IntFlag):
