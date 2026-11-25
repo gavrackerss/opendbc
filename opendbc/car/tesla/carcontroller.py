@@ -1209,15 +1209,10 @@ class CarController(CarControllerBase):
             tol_u = 0.7 if speed_units == 'MPH' else 1.0
             full_step_u = 5.0
             offset_u = target_u - current_u
-            # Automatic posted-limit sources may reduce the physical Tesla SET, but must
-            # never raise it. A bad/stale map value previously caused repeated RES/UP
-            # pulses immediately after OP engagement (for example climbing toward ~90 mph).
-            # Upward changes remain available only through the driver's explicit V279
-            # 40/50/60/NSL controls, which use _v279_manual_cruise_sync above.
-            if offset_u > tol_u:
-              setsync_reason = f'blocked_upward_auto src={target_src} tgt={target_u:.1f} cur={current_u:.1f}'
-              if (self.frame % 100) == 0:
-                cloudlog.warning(f'[XNOR_V231_SETSYNC] {setsync_reason}')
+            if offset_u >= (full_step_u - tol_u):
+              setsync_btn = int(BTN_UP2)
+            elif offset_u >= tol_u:
+              setsync_btn = int(BTN_UP1)
             elif offset_u <= -(full_step_u - tol_u):
               setsync_btn = int(BTN_DOWN2)
             elif offset_u <= -tol_u:
