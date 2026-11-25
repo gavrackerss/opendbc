@@ -27,9 +27,9 @@ class CarInterface(CarInterfaceBase):
       return False, False, False
     disabled = bool(p.get_bool("TinklaAutopilotDisabled"))
     hybrid = bool(p.get_bool("TinklaHybridNativeAP")) and not disabled
-    # Do not suppress stock AEB warnings in this unqualified native port.
-    # The historical HUD override and native DAS_lssState layouts conflict.
-    ignore_hud_aeb = False
+    # Preserve the 0.11.1 XNOR preference. Panda/safety still owns the actual
+    # forwarding decision; this only restores the user's explicit opt-in flag.
+    ignore_hud_aeb = bool(p.get_bool("TinklaIgnoreStockAeb"))
     return disabled, hybrid, ignore_hud_aeb
 
   @staticmethod
@@ -62,6 +62,9 @@ class CarInterface(CarInterfaceBase):
     if alpha_long:
       ret.openpilotLongitudinalControl = True
       ret.safetyConfigs[0].safetyParam |= TeslaSafetyFlags.LONG_CONTROL.value
+      ret.deprecated.vEgoStopping = 0.1
+      ret.deprecated.vEgoStarting = 0.1
+      ret.deprecated.stoppingDecelRate = 0.3
 
     fsd_14 = any(fw.ecu == Ecu.eps and fw.fwVersion in FSD_14_FW.get(candidate, []) for fw in car_fw)
     if fsd_14:
@@ -117,6 +120,11 @@ class CarInterface(CarInterfaceBase):
 
     # Independent safety checks still gate actual longitudinal control.
     ret.minEnableSpeed = -1.
+    # 0.11.2 moved these fields into the deprecated group, but XNOR's legacy
+    # low-speed behavior still consumes them through compatibility code.
+    ret.deprecated.vEgoStopping = 0.1
+    ret.deprecated.vEgoStarting = 0.1
+    ret.deprecated.stoppingDecelRate = 0.3
     # vEgoStopping/vEgoStarting/stoppingDecelRate are deprecated group
     # members in pinned 0.11.2 capnp; setting them as root fields causes
     # CarInterface.get_non_essential_params() to raise AttributeError.
