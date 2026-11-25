@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from enum import Enum, IntFlag
 from opendbc.car import Bus, CarSpecs, DbcDict, PlatformConfig, Platforms
-from opendbc.car.lateral import AngleSteeringLimits
+from opendbc.car.lateral import AngleSteeringLimits, AngleSteeringLimitsVM
 from opendbc.car.structs import CarParams, CarState
 from opendbc.car.docs_definitions import CarDocs, CarFootnote, CarHarness, CarParts, Column
 from opendbc.car.fw_query_definitions import FwQueryConfig, Request, StdQueries
@@ -204,13 +204,20 @@ class CruiseButtons:
 
 
 class CarControllerParams:
-  ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
+  # Native 0.11.2 Model 3/Y/Raven safety API remains VM-based.
+  ANGLE_LIMITS: AngleSteeringLimitsVM = AngleSteeringLimitsVM(
+    360,
+    MAX_ANGLE_RATE=5,
+  )
+
+  # Legacy Model S/X userspace behavior from the working 0.11.1 XNOR tree.
+  # Panda independently keeps the VM safety backstop on the transmitted angle.
+  LEGACY_ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(
     360,
     ([0., 5., 15.], [11.5, 11.0, 4.6]),
     ([0., 5., 15.], [11.5, 11.5, 6.2]),
   )
 
-  # Curvature-aware lane-positioning bias from the working 0.11.1 XNOR tree.
   CURVE_ASSIST_ANGLE_BP = [0.0, 4.0, 10.0, 18.0]
   CURVE_ASSIST_GAIN_V = [1.00, 1.005, 1.015, 1.025]
   CURVE_ASSIST_EXTRA_DEG_V = [0.0, 0.03, 0.18, 0.40]
