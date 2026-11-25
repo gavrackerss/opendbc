@@ -601,7 +601,11 @@ class CarState(CarStateBase):
     picked_ms = float(cruise_set_u) * float(conv) if float(cruise_set_u) > 0.0 else 0.0
 
     self._cruise_set_hold_src = ""
-    if bool(raw_cruise_enabled) and picked_ms > 0.1 and str(src).startswith("DI_cruiseSet"):
+    # 0.11.1 parity: a decoded DI cruise-set value is trusted for the
+    # transient-STANDBY hold. 0.11.2 needs explicit legacy aliases because its
+    # native DBC reuses these bit positions differently.
+    trusted_cruise_set = str(src).startswith(("DI_cruiseSet", "XNOR_DI_cruiseSetLegacy"))
+    if bool(raw_cruise_enabled) and picked_ms > 0.1 and trusted_cruise_set:
       self._last_valid_stock_cruise_set_speed_ms = float(picked_ms)
       self._last_valid_stock_cruise_set_ms = int(now_ms)
 
