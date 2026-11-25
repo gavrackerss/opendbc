@@ -1415,6 +1415,20 @@ class CarController(CarControllerBase):
     actuators = CC.actuators
     can_sends = []
 
+    # 0.11.1 CarInterface.post_update parity: HSO owns the timed human-control
+    # numb window. 0.11.2 removed post_update from the interface lifecycle, so
+    # run the unchanged HSO state machine here where CC.latActive and actuators
+    # are available before any lateral-authority decision is made.
+    try:
+      CS.human_control = bool(CS.hso_controller.update_stat(
+        CS,
+        bool(getattr(CC, "latActive", False)),
+        actuators,
+        int(getattr(CS, "_param_frame", self.frame)),
+      ))
+    except Exception:
+      CS.human_control = False
+
     self._track_human_cruise_actions(CS)
 
 
