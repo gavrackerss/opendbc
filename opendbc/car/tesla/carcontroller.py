@@ -200,7 +200,6 @@ class CarController(CarControllerBase):
     self._v241_autoresume_last_attempt_frame = -100000
     self._v241_autoresume_failed_reported = False
     self._cached_auto_resume_acc = bool(self.params.get_bool("TinklaAutoResumeACC"))
-    self._cached_experimental_mode = bool(self.params.get_bool("ExperimentalMode"))
     # V231: Unity-style native cruise SET synchronisation while V229 owns
     # DAS_control. This is deliberately independent of acceleration authority.
     self._v231_setsync_last_button_ms = 0
@@ -342,7 +341,6 @@ class CarController(CarControllerBase):
     # gate below can keep long_active true in that mode.
     self._cached_enable_acc = bool(self.params.get_bool("TinklaEnableACC"))
     self._cached_auto_resume_acc = bool(self.params.get_bool("TinklaAutoResumeACC"))
-    self._cached_experimental_mode = bool(self.params.get_bool("ExperimentalMode"))
     self._cached_autosteer_247_test = bool(self.params.get_bool("TinklaAutosteer247Test"))
     self._cached_pedal_enabled = bool(
       self.params.get_bool("TinklaPedalEnabled") or
@@ -703,11 +701,12 @@ class CarController(CarControllerBase):
     if not self._v241_autoresume_brake_seen:
       return False
 
-    # controlsd V234 owns the one-second brake/regen guard. Its longActive rising
+    # controlsd owns the one-second brake/regen guard. Its longActive rising
     # state is the permission to attempt the native re-arm; do not duplicate that timer here.
+    # TinklaAutoResumeACC is the sole feature gate, matching the original Unity
+    # behavior ("works with both CC"); ExperimentalMode is unrelated.
     eligible = bool(
       self._cached_auto_resume_acc
-      and self._cached_experimental_mode
       and long_active
       and stock_state == "STANDBY"
       and not brake and not regen and not gas
